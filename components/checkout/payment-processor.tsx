@@ -11,6 +11,7 @@ import { useToast } from "@/components/ui/use-toast"
 import { Loader2, ExternalLink, Check, Copy, AlertCircle } from "lucide-react"
 import * as web3 from "@solana/web3.js"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { TransactionConfirmationDialog } from "./transaction-confirmation-dialog"
 
 interface PaymentProcessorProps {
   paymentData: any
@@ -31,6 +32,8 @@ export function PaymentProcessor({ paymentData, onSuccess, onError }: PaymentPro
   const [connection, setConnection] = useState<web3.Connection | null>(null)
   const [debugInfo, setDebugInfo] = useState<string[]>([])
   const [walletBalance, setWalletBalance] = useState<number | null>(null)
+  const [estimatedFee, setEstimatedFee] = useState<number>(0.000005) // Default estimated fee in SOL
+  const [showConfirmation, setShowConfirmation] = useState(false)
   const debugRef = useRef<string[]>([])
 
   // Get Solana network from env
@@ -94,6 +97,28 @@ export function PaymentProcessor({ paymentData, onSuccess, onError }: PaymentPro
     }
   }, [connected, publicKey, connection])
 
+  // Update estimated fee
+  const updateEstimatedFee = async () => {
+    if (connection) {
+      try {
+        const { feeCalculator } = await connection.getRecentBlockhash()
+        const feeInLamports = feeCalculator.lamportsPerSignature
+        setEstimatedFee(feeInLamports / web3.LAMPORTS_PER_SOL)
+        addDebugLog(`Estimated fee updated: ${feeInLamports / web3.LAMPORTS_PER_SOL} SOL`)
+      } catch (error) {
+        console.error("Failed to get fee calculator:", error)
+        addDebugLog(`Failed to get fee calculator: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  }
+
+  // Update fee when connection is established
+  useEffect(() => {
+    if (connection) {
+      updateEstimatedFee()
+    }
+  }, [connection])
+
   useEffect(() => {
     // Set recipient based on payment data format
     if (paymentData?.merchantAddress) {
@@ -138,7 +163,7 @@ export function PaymentProcessor({ paymentData, onSuccess, onError }: PaymentPro
     }
   }
 
-  const handlePayment = async () => {
+  const handleInitiatePayment = () => {
     if (!connected || !publicKey) {
       toast({
         title: "Wallet not connected",
@@ -175,6 +200,11 @@ export function PaymentProcessor({ paymentData, onSuccess, onError }: PaymentPro
       return
     }
 
+    // Show confirmation dialog
+    setShowConfirmation(true)
+  }
+
+  const handlePayment = async () => {
     try {
       setLoading(true)
       setPaymentStatus("processing")
@@ -183,14 +213,14 @@ export function PaymentProcessor({ paymentData, onSuccess, onError }: PaymentPro
       setDebugInfo([])
 
       addDebugLog("Starting payment process...")
-      addDebugLog(`From: ${publicKey.toString()}`)
+      addDebugLog(`From: ${publicKey!.toString()}`)
       addDebugLog(`To: ${recipient}`)
       addDebugLog(`Amount: ${amount} SOL`)
       addDebugLog(`Network: ${network}`)
       addDebugLog(`RPC Endpoint: ${rpcEndpoint}`)
 
       // Check sender balance first
-      const balance = await connection.getBalance(publicKey)
+      const balance = await connection!.getBalance(publicKey!)
       addDebugLog(`Current wallet balance: ${balance / web3.LAMPORTS_PER_SOL} SOL`)
 
       // Parse recipient address
@@ -206,7 +236,7 @@ export function PaymentProcessor({ paymentData, onSuccess, onError }: PaymentPro
       addDebugLog(`Lamports to send: ${lamports}`)
 
       // Calculate transaction fee (estimate)
-      const feeCalculator = await connection.getRecentBlockhash()
+      const feeCalculator = await connection!.getRecentBlockhash()
       const estimatedFee = feeCalculator.feeCalculator.lamportsPerSignature
       addDebugLog(`Estimated transaction fee: ${estimatedFee} lamports`)
 
@@ -227,7 +257,7 @@ export function PaymentProcessor({ paymentData, onSuccess, onError }: PaymentPro
 
       // Get recent blockhash first
       addDebugLog("Getting recent blockhash...")
-      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed")
+      const { blockhash, lastValidBlockHeight } = await connection!.getLatestBlockhash("confirmed")
       addDebugLog(`Blockhash: ${blockhash}, Last valid block height: ${lastValidBlockHeight}`)
 
       // Set recent blockhash and fee payer
@@ -238,7 +268,7 @@ export function PaymentProcessor({ paymentData, onSuccess, onError }: PaymentPro
       addDebugLog("Adding transfer instruction...")
       transaction.add(
         web3.SystemProgram.transfer({
-          fromPubkey: publicKey,
+          fromPubkey: publicKey!,
           toPubkey: recipientPubkey,
           lamports: lamports,
         }),
@@ -291,7 +321,7 @@ export function PaymentProcessor({ paymentData, onSuccess, onError }: PaymentPro
       addDebugLog("Sending transaction...")
 
       // Send transaction with explicit options
-      const signature = await sendTransaction(transaction, connection, {
+      const signature = await sendTransaction(transaction, connection!, {
         skipPreflight: false, // Enable preflight checks
         preflightCommitment: "confirmed",
         maxRetries: 5,
@@ -309,7 +339,7 @@ export function PaymentProcessor({ paymentData, onSuccess, onError }: PaymentPro
       }
 
       // Use a more reliable confirmation method
-      const status = await connection.confirmTransaction(confirmationStrategy, "confirmed")
+      const status = await connection!.confirmTransaction(confirmationStrategy, "confirmed")
 
       if (status.value.err) {
         throw new Error(`Transaction failed to confirm: ${JSON.stringify(status.value.err)}`)
@@ -317,7 +347,7 @@ export function PaymentProcessor({ paymentData, onSuccess, onError }: PaymentPro
 
       // Verify the transaction was successful by checking recipient balance
       try {
-        const newRecipientBalance = await connection.getBalance(recipientPubkey)
+        const newRecipientBalance = await connection!.getBalance(recipientPubkey)
         addDebugLog(`Recipient new balance: ${newRecipientBalance / web3.LAMPORTS_PER_SOL} SOL`)
       } catch (e) {
         addDebugLog(`Failed to check recipient balance: ${e instanceof Error ? e.message : String(e)}`)
@@ -349,6 +379,7 @@ export function PaymentProcessor({ paymentData, onSuccess, onError }: PaymentPro
       onError(errorMsg)
     } finally {
       setLoading(false)
+      setShowConfirmation(false)
     }
   }
 
@@ -395,117 +426,131 @@ export function PaymentProcessor({ paymentData, onSuccess, onError }: PaymentPro
   }
 
   return (
-    <Card className="w-full max-w-md">
-      <CardHeader>
-        <CardTitle>Make Payment</CardTitle>
-        <CardDescription>
-          {paymentData?.label || paymentData?.merchantName
-            ? `Payment to ${paymentData.label || paymentData.merchantName}`
-            : "Send SOL to the recipient"}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {errorMessage && (
-          <Alert variant="destructive">
-            <AlertCircle className="h-4 w-4" />
-            <AlertTitle>Error</AlertTitle>
-            <AlertDescription>{errorMessage}</AlertDescription>
-          </Alert>
-        )}
-
-        {/* Wallet balance display */}
-        {connected && walletBalance !== null && (
-          <div className="rounded-lg border p-3 bg-muted/50">
-            <div className="flex justify-between items-center">
-              <span className="text-sm font-medium">Your Balance:</span>
-              <span className="text-sm font-mono">{walletBalance.toFixed(6)} SOL</span>
-            </div>
-          </div>
-        )}
-
-        <div className="space-y-2">
-          <Label htmlFor="recipient">Recipient</Label>
-          <Input
-            id="recipient"
-            value={recipient}
-            onChange={(e) => setRecipient(e.target.value)}
-            className="font-mono text-xs"
-          />
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor="amount">Amount (SOL)</Label>
-          <Input
-            id="amount"
-            type="number"
-            placeholder="0.00"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            disabled={loading}
-            step="0.001"
-            min="0.001"
-          />
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor="memo">Memo (Optional)</Label>
-          <Input
-            id="memo"
-            placeholder="Add a note to this payment"
-            value={memo}
-            onChange={(e) => setMemo(e.target.value)}
-            disabled={loading}
-          />
-        </div>
-
-        {!connected ? (
-          <div className="rounded-lg border p-4 text-center">
-            <p className="mb-2 text-sm">Connect your wallet to make a payment</p>
-            <WalletMultiButton className="wallet-adapter-button-custom mx-auto" />
-          </div>
-        ) : (
-          <div className="rounded-lg border p-4">
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-medium">From</span>
-              <span className="text-sm">
-                {publicKey
-                  ? `${publicKey.toString().substring(0, 4)}...${publicKey
-                      .toString()
-                      .substring(publicKey.toString().length - 4)}`
-                  : "Not connected"}
-              </span>
-            </div>
-          </div>
-        )}
-
-        {/* Debug information (collapsible) */}
-        <details className="rounded-lg border p-2" open>
-          <summary className="cursor-pointer text-sm font-medium">Debug Information</summary>
-          <div className="mt-2 max-h-40 overflow-auto rounded bg-gray-100 p-2 text-xs font-mono dark:bg-gray-800">
-            {debugInfo.length > 0 ? (
-              debugInfo.map((log, index) => (
-                <div key={index} className="py-1">
-                  {log}
-                </div>
-              ))
-            ) : (
-              <div className="py-1 text-muted-foreground">No debug information available yet.</div>
-            )}
-          </div>
-        </details>
-      </CardContent>
-      <CardFooter className="flex flex-col space-y-2">
-        <Button className="w-full" onClick={handlePayment} disabled={loading || !connected}>
-          {loading ? (
-            <>
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              Processing...
-            </>
-          ) : (
-            `Pay ${amount ? `${amount} SOL` : ""}`
+    <>
+      <Card className="w-full max-w-md">
+        <CardHeader>
+          <CardTitle>Make Payment</CardTitle>
+          <CardDescription>
+            {paymentData?.label || paymentData?.merchantName
+              ? `Payment to ${paymentData.label || paymentData.merchantName}`
+              : "Send SOL to the recipient"}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {errorMessage && (
+            <Alert variant="destructive">
+              <AlertCircle className="h-4 w-4" />
+              <AlertTitle>Error</AlertTitle>
+              <AlertDescription>{errorMessage}</AlertDescription>
+            </Alert>
           )}
-        </Button>
-      </CardFooter>
-    </Card>
+
+          {/* Wallet balance display */}
+          {connected && walletBalance !== null && (
+            <div className="rounded-lg border p-3 bg-muted/50">
+              <div className="flex justify-between items-center">
+                <span className="text-sm font-medium">Your Balance:</span>
+                <span className="text-sm font-mono">{walletBalance.toFixed(6)} SOL</span>
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-2">
+            <Label htmlFor="recipient">Recipient</Label>
+            <Input
+              id="recipient"
+              value={recipient}
+              onChange={(e) => setRecipient(e.target.value)}
+              className="font-mono text-xs"
+            />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="amount">Amount (SOL)</Label>
+            <Input
+              id="amount"
+              type="number"
+              placeholder="0.00"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              disabled={loading}
+              step="0.001"
+              min="0.001"
+            />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="memo">Memo (Optional)</Label>
+            <Input
+              id="memo"
+              placeholder="Add a note to this payment"
+              value={memo}
+              onChange={(e) => setMemo(e.target.value)}
+              disabled={loading}
+            />
+          </div>
+
+          {!connected ? (
+            <div className="rounded-lg border p-4 text-center">
+              <p className="mb-2 text-sm">Connect your wallet to make a payment</p>
+              <WalletMultiButton className="wallet-adapter-button-custom mx-auto" />
+            </div>
+          ) : (
+            <div className="rounded-lg border p-4">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">From</span>
+                <span className="text-sm">
+                  {publicKey
+                    ? `${publicKey.toString().substring(0, 4)}...${publicKey
+                        .toString()
+                        .substring(publicKey.toString().length - 4)}`
+                    : "Not connected"}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Debug information (collapsible) */}
+          <details className="rounded-lg border p-2" open>
+            <summary className="cursor-pointer text-sm font-medium">Debug Information</summary>
+            <div className="mt-2 max-h-40 overflow-auto rounded bg-gray-100 p-2 text-xs font-mono dark:bg-gray-800">
+              {debugInfo.length > 0 ? (
+                debugInfo.map((log, index) => (
+                  <div key={index} className="py-1">
+                    {log}
+                  </div>
+                ))
+              ) : (
+                <div className="py-1 text-muted-foreground">No debug information available yet.</div>
+              )}
+            </div>
+          </details>
+        </CardContent>
+        <CardFooter className="flex flex-col space-y-2">
+          <Button className="w-full" onClick={handleInitiatePayment} disabled={loading || !connected}>
+            {loading ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Processing...
+              </>
+            ) : (
+              `Pay ${amount ? `${amount} SOL` : ""}`
+            )}
+          </Button>
+        </CardFooter>
+      </Card>
+
+      <TransactionConfirmationDialog
+        isOpen={showConfirmation}
+        onClose={() => setShowConfirmation(false)}
+        onConfirm={handlePayment}
+        recipient={recipient}
+        amount={amount}
+        memo={memo}
+        isLoading={loading}
+        walletBalance={walletBalance}
+        estimatedFee={estimatedFee}
+      />
+    </>
   )
 }
